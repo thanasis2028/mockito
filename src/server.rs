@@ -27,6 +27,10 @@ impl Mock {
         let raw_body = &request.body;
         let safe_body = &String::from_utf8_lossy(raw_body);
 
+        if let crate::Matcher::Function(function) = &self.body {
+            return function(request);
+        }
+
         self.body.matches_value(safe_body) || self.body.matches_binary_value(raw_body)
     }
 

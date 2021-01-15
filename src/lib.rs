@@ -587,17 +587,17 @@ extern crate lazy_static;
 extern crate log;
 
 mod diff;
+mod server;
 mod request;
 mod response;
-mod server;
 
-type Request = request::Request;
+pub type Request = request::Request;
 type Response = response::Response;
 
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use regex::Regex;
-use std::cell::RefCell;
+use std::{cell::RefCell, ops, ptr};
 use std::collections::HashMap;
 use std::convert::{From, Into};
 use std::fmt;
@@ -700,6 +700,8 @@ pub enum Matcher {
     /// Matches a URL-encoded key/value pair, where both key and value should be specified
     /// in plain (unencoded) format
     UrlEncoded(String, String),
+    /// Uses a custom function to determine whether request should match or not
+    Function(FnMatcher),
     /// At least one matcher must match
     AnyOf(Vec<Matcher>),
     /// All matchers must match
@@ -710,9 +712,53 @@ pub enum Matcher {
     Missing,
 }
 
+///
+/// Helper structure for `Matcher::Function`.
+///
+#[derive(Clone)]
+pub struct FnMatcher {
+    inner: Arc<dyn Fn(&Request) -> bool + Send + Sync>,
+}
+
+impl FnMatcher {
+    pub fn new(inner: impl Fn(&Request) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+}
+
+impl fmt::Debug for FnMatcher {
+    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl PartialEq for FnMatcher {
+    fn eq(&self, other: &Self) -> bool {
+        ptr::eq(self.inner.as_ref(), other.inner.as_ref())
+    }
+}
+
+impl ops::Deref for FnMatcher {
+    type Target = dyn Fn(&Request) -> bool;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
 impl<'a> From<&'a str> for Matcher {
     fn from(value: &str) -> Self {
         Matcher::Exact(value.to_string())
+    }
+}
+
+impl<F> From<F> for Matcher
+    where F: Fn(&Request) -> bool + Send + Sync + 'static
+{
+    fn from(function: F) -> Self {
+        Matcher::Function(FnMatcher::new(function))
     }
 }
 
@@ -762,6 +808,7 @@ impl fmt::Display for Matcher {
             Matcher::UrlEncoded(ref field, ref value) => {
                 format!("{}={} (urlencoded)", field, value)
             }
+            Matcher::Function(_) => "(function)".to_string(),
             Matcher::Any => "(any)".to_string(),
             Matcher::AnyOf(x) => format!("({}) (any of)", join_matches(x)),
             Matcher::AllOf(x) => format!("({}) (all of)", join_matches(x)),
@@ -832,6 +879,7 @@ impl Matcher {
                     })
                     .unwrap_or(false)
             }
+            Matcher::Function(..) => false,
             Matcher::Any => true,
             Matcher::AnyOf(ref matchers) => matchers.iter().any(|m| m.matches_value(other)),
             Matcher::AllOf(ref matchers) => matchers.iter().all(|m| m.matches_value(other)),
@@ -1402,6 +1450,7 @@ impl fmt::Display for Mock {
                 formatted.push_str("=");
                 formatted.push_str(value);
             }
+            Matcher::Function(..) => {},
             Matcher::Missing => formatted.push_str("(missing)\r\n"),
             Matcher::AnyOf(..) => formatted.push_str("(any of)\r\n"),
             Matcher::AllOf(..) => formatted.push_str("(all of)\r\n"),
