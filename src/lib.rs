@@ -931,6 +931,7 @@ impl fmt::Display for BinaryBody {
 ///
 /// Stores information about a mocked request. Should be initialized via `mockito::mock()`.
 ///
+#[must_use = "mocks do nothing unless you `.assert()` them"]
 #[derive(Clone, PartialEq, Debug)]
 pub struct Mock {
     id: String,
@@ -1341,7 +1342,7 @@ impl Drop for Mock {
             let mut state = server::STATE.lock().unwrap();
 
             if let Some(pos) = state.mocks.iter().position(|mock| mock.id == self.id) {
-                state.mocks.remove(pos);
+                let _ = state.mocks.remove(pos);
             }
 
             debug!("Mock::drop() called for {}", self);
