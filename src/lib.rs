@@ -615,11 +615,11 @@ lazy_static! {
     static ref TEST_MUTEX: Mutex<()> = Mutex::new(());
 }
 
-thread_local!(
+thread_local! {
     // A thread-local reference to the global lock. This is acquired within `Mock#create()`.
     static LOCAL_TEST_MUTEX: RefCell<LockResult<MutexGuard<'static, ()>>> =
         RefCell::new(TEST_MUTEX.lock());
-);
+}
 
 ///
 /// Points to the address the mock server is running at.
@@ -1350,7 +1350,7 @@ impl Mock {
     }
 
     ///
-    /// Registers the mock to the server - your mock will be served only after calling this method.
+    /// Registers mock to the server.
     ///
     /// ## Example
     ///
@@ -1361,11 +1361,27 @@ impl Mock {
     /// ```
     ///
     #[must_use]
-    pub fn create(mut self) -> Self {
-        server::try_start();
-
+    pub fn create(self) -> Self {
         // Ensures Mockito tests are run sequentially.
         LOCAL_TEST_MUTEX.with(|_| {});
+
+        self.create_concurrent()
+    }
+
+    ///
+    /// Registers mock to the server without forcing tests to run sequentially.
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// use mockito::mock;
+    ///
+    /// let _m = mock("GET", "/").with_body("hello world").create_concurrent();
+    /// ```
+    ///
+    #[must_use]
+    pub fn create_concurrent(mut self) -> Self {
+        server::try_start();
 
         let mut state = server::STATE.lock().unwrap();
 
