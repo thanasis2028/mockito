@@ -581,6 +581,8 @@
 //! still be run in parallel.
 //!
 
+#![feature(thread_id_value)]
+
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
@@ -609,6 +611,7 @@ use std::path::Path;
 use std::string::ToString;
 use std::sync::Arc;
 use std::sync::{LockResult, Mutex, MutexGuard};
+use std::thread;
 
 lazy_static! {
     // A global lock that ensure all Mockito tests are run on a single thread.
@@ -656,6 +659,14 @@ use assert_json_diff::assert_json_include_no_panic;
 ///
 pub fn mock<P: Into<Matcher>>(method: &str, path: P) -> Mock {
     Mock::new(method, path)
+}
+
+///
+/// Returns current thread's unique identifier; please see
+/// `Mock::create_concurrent()` for details.
+///
+pub fn tid() -> String {
+    format!("thread-{}", thread::current().id().as_u64().get())
 }
 
 ///
@@ -1365,11 +1376,14 @@ impl Mock {
         // Ensures Mockito tests are run sequentially.
         LOCAL_TEST_MUTEX.with(|_| {});
 
-        self.create_concurrent()
+        self.create_inner()
     }
 
     ///
     /// Registers mock to the server without forcing tests to run sequentially.
+    ///
+    /// To avoid conflicts, mock's URL is automatically prepended with current
+    /// thread's unique identifier - please see `tid()` for details.
     ///
     /// ## Example
     ///
@@ -1381,6 +1395,17 @@ impl Mock {
     ///
     #[must_use]
     pub fn create_concurrent(mut self) -> Self {
+        if let PathAndQueryMatcher::Unified(Matcher::Exact(url)) = &mut self.path {
+            *url = format!("/{}{}", tid(), url);
+        } else {
+            unimplemented!("create_concurrent() for non-exact URLs");
+        }
+
+        self.create_inner()
+    }
+
+    #[must_use]
+    fn create_inner(mut self) -> Self {
         server::try_start();
 
         let mut state = server::STATE.lock().unwrap();
