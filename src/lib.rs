@@ -589,9 +589,9 @@ extern crate lazy_static;
 extern crate log;
 
 mod diff;
-mod server;
 mod request;
 mod response;
+mod server;
 
 pub type Request = request::Request;
 type Response = response::Response;
@@ -599,7 +599,7 @@ type Response = response::Response;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use regex::Regex;
-use std::{cell::RefCell, ops, ptr};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::convert::{From, Into};
 use std::fmt;
@@ -612,6 +612,7 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::sync::{LockResult, Mutex, MutexGuard};
 use std::thread;
+use std::{cell::RefCell, ops, ptr};
 
 lazy_static! {
     // A global lock that ensure all Mockito tests are run on a single thread.
@@ -766,7 +767,8 @@ impl<'a> From<&'a str> for Matcher {
 }
 
 impl<F> From<F> for Matcher
-    where F: Fn(&Request) -> bool + Send + Sync + 'static
+where
+    F: Fn(&Request) -> bool + Send + Sync + 'static,
 {
     fn from(function: F) -> Self {
         Matcher::Function(FnMatcher::new(function))
@@ -1291,7 +1293,7 @@ impl Mock {
         let mut opt_message = None;
 
         {
-            let state = server::STATE.lock().unwrap();
+            let mut state = server::STATE.lock().unwrap();
 
             if let Some(remote_mock) = state.mocks.iter().find(|mock| mock.id == self.id) {
                 let mut message = match (self.expected_hits_at_least, self.expected_hits_at_most) {
@@ -1317,13 +1319,30 @@ impl Mock {
                     ),
                 };
 
-                if let Some(last_request) = state.unmatched_requests.last() {
+                let (unmatched_request, text) =
+                    match self.most_similar_unmatched_request(state.unmatched_requests.as_mut()) {
+                        Some(similar) => (Some(similar), "most similar"),
+                        None => (state.unmatched_requests.last_mut(), "last"),
+                    };
+
+                if let Some(mut unmatched_request) = unmatched_request {
+                    if unmatched_request.headers.iter().any(|(key, value)| {
+                        key.to_lowercase() == "content-type" && value.contains("json")
+                    }) {
+                        if let Ok(new_body) =
+                            serde_json::from_slice::<Value>(&unmatched_request.body)
+                                .and_then(|v| serde_json::to_vec_pretty(&v))
+                        {
+                            unmatched_request.body = new_body;
+                        }
+                    }
                     message.push_str(&format!(
-                        "> The last unmatched request was:\n{}\n",
-                        last_request
+                        "> The {} unmatched request was:\n{}\n",
+                        text, unmatched_request
                     ));
 
-                    let difference = diff::compare(&self.to_string(), &last_request.to_string());
+                    let difference =
+                        diff::compare(&self.to_string(), &unmatched_request.to_string());
                     message.push_str(&format!("> Difference:\n{}\n", difference));
                 }
 
@@ -1336,6 +1355,31 @@ impl Mock {
         } else {
             panic!("Could not retrieve enough information about the remote mock.")
         }
+    }
+
+    fn most_similar_unmatched_request<'a>(
+        &self,
+        unmatched_requests: &'a mut [Request],
+    ) -> Option<&'a mut Request> {
+        let mut best_match = None;
+        let mut best_match_len = 3; // any shorter matches are not considered as similar
+
+        for request in unmatched_requests {
+            if self.method == request.method {
+                if self.path.matches_value(&request.path) {
+                    // found exact match
+                    return Some(request);
+                } else {
+                    // try to find best match
+                    let len = starts_with_len(&self.path.to_string(), &request.path);
+                    if len > best_match_len {
+                        best_match = Some(request);
+                        best_match_len = len;
+                    }
+                }
+            }
+        }
+        best_match
     }
 
     ///
@@ -1473,7 +1517,6 @@ impl fmt::Display for Mock {
 
         match self.body {
             Matcher::Exact(ref value)
-            | Matcher::JsonString(ref value)
             | Matcher::PartialJsonString(ref value)
             | Matcher::Regex(ref value) => {
                 formatted.push_str(value);
@@ -1482,8 +1525,17 @@ impl fmt::Display for Mock {
             Matcher::Binary(_) => {
                 formatted.push_str("(binary)\r\n");
             }
+            Matcher::JsonString(ref value) => {
+                match serde_json::from_str::<Value>(&value)
+                    .and_then(|v| serde_json::to_string_pretty(&v))
+                {
+                    Ok(value) => formatted.push_str(&value),
+                    Err(_) => formatted.push_str(value),
+                };
+                formatted.push_str("\r\n");
+            }
             Matcher::Json(ref json_obj) | Matcher::PartialJson(ref json_obj) => {
-                formatted.push_str(&json_obj.to_string());
+                formatted.push_str(&serde_json::to_string_pretty(json_obj).unwrap());
                 formatted.push_str("\r\n")
             }
             Matcher::UrlEncoded(ref field, ref value) => {
@@ -1491,7 +1543,7 @@ impl fmt::Display for Mock {
                 formatted.push_str("=");
                 formatted.push_str(value);
             }
-            Matcher::Function(..) => {},
+            Matcher::Function(..) => {}
             Matcher::Missing => formatted.push_str("(missing)\r\n"),
             Matcher::AnyOf(..) => formatted.push_str("(any of)\r\n"),
             Matcher::AllOf(..) => formatted.push_str("(all of)\r\n"),
@@ -1500,4 +1552,15 @@ impl fmt::Display for Mock {
 
         f.write_str(&formatted)
     }
+}
+
+fn starts_with_len(left: &str, right: &str) -> usize {
+    let mut i = 0;
+    for (c1, c2) in left.chars().zip(right.chars()) {
+        if c1 != c2 {
+            return i;
+        }
+        i += 1;
+    }
+    i
 }
